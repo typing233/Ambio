@@ -64,6 +64,7 @@ interface LayerNodes {
   stop: () => void;
   startTriggerLoop?: () => void;
   stopTriggerLoop?: () => void;
+  trigger?: () => void;
   baseVolume: number;
   spatialConfig: SpatialBehavior;
   triggerRelations: TriggerRelation[];
@@ -291,6 +292,7 @@ function buildBird1(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: chirp,
   };
 }
 
@@ -348,6 +350,7 @@ function buildBird2(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: chirp,
   };
 }
 
@@ -488,6 +491,7 @@ function buildCafeMachine(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: trigger,
   };
 }
 
@@ -541,6 +545,7 @@ function buildCafeClink(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: trigger,
   };
 }
 
@@ -596,6 +601,7 @@ function buildCafeDoor(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: trigger,
   };
 }
 
@@ -730,6 +736,7 @@ function buildThunder(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: trigger,
   };
 }
 
@@ -784,6 +791,7 @@ function buildDrip(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: trigger,
   };
 }
 
@@ -872,6 +880,7 @@ function buildClock(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: tick,
   };
 }
 
@@ -937,6 +946,7 @@ function buildPageTurn(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: trigger,
   };
 }
 
@@ -998,6 +1008,7 @@ function buildPen(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: trigger,
   };
 }
 
@@ -1053,6 +1064,7 @@ function buildOwl(
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
+    trigger: trigger,
   };
 }
 
@@ -1103,6 +1115,7 @@ export class AudioEngine {
   private mouseX: number = 0.5;
   private mouseY: number = 0.5;
   private userVolumes: Map<string, number> = new Map();
+  private spatialAudioEnabled: boolean = true;
 
   private ensureContext() {
     if (!this.ctx || this.ctx.state === 'closed') {
@@ -1152,7 +1165,7 @@ export class AudioEngine {
   }
 
   private applySpatialUpdates() {
-    if (!this.ctx) return;
+    if (!this.ctx || !this.spatialAudioEnabled) return;
 
     for (const [layerId, nodes] of this.activeNodes) {
       const config = nodes.spatialConfig;
@@ -1182,10 +1195,43 @@ export class AudioEngine {
     }
   }
 
+  private resetSpatialState() {
+    if (!this.ctx) return;
+
+    for (const [layerId, nodes] of this.activeNodes) {
+      const config = nodes.spatialConfig;
+      
+      if (config.panAffected && nodes.panNode) {
+        ramp(nodes.panNode.pan, config.basePan, this.ctx, 0.2);
+      }
+
+      const userVolume = this.userVolumes.get(layerId) ?? nodes.baseVolume;
+      ramp(nodes.gainNode.gain, userVolume, this.ctx, 0.2);
+    }
+  }
+
   updateMousePosition(normalizedX: number, normalizedY: number) {
+    if (!this.spatialAudioEnabled) return;
+    
     this.mouseX = clamp(normalizedX, 0, 1);
     this.mouseY = clamp(normalizedY, 0, 1);
     this.applySpatialUpdates();
+  }
+
+  setSpatialAudioEnabled(enabled: boolean) {
+    if (this.spatialAudioEnabled === enabled) return;
+    
+    this.spatialAudioEnabled = enabled;
+    
+    if (!enabled) {
+      this.resetSpatialState();
+    } else {
+      this.applySpatialUpdates();
+    }
+  }
+
+  get isSpatialAudioEnabled(): boolean {
+    return this.spatialAudioEnabled;
   }
 
   async loadScene(scene: SceneDef): Promise<void> {
@@ -1224,39 +1270,36 @@ export class AudioEngine {
       }
 
       if (layer.type === 'detail' && nodes.startTriggerLoop) {
-        const originalLoop = nodes.startTriggerLoop;
         let running = false;
         let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-        const createProbabilisticLoop = (minInterval: number, maxInterval: number) => {
-          const probabilisticLoop = () => {
-            if (!running) return;
-            
-            const multiplier = this.getProbabilityMultiplier(layer.id);
-            if (Math.random() < multiplier || multiplier >= 1) {
-              nodes.stopTriggerLoop?.();
-              originalLoop();
-            }
-            
-            let actualMultiplier = multiplier;
-            if (multiplier > 1) {
-              actualMultiplier = 1 / multiplier;
-            }
-            
-            const baseInterval = minInterval + Math.random() * (maxInterval - minInterval);
-            const nextDelay = baseInterval * actualMultiplier;
-            
-            timeoutId = setTimeout(probabilisticLoop, Math.max(nextDelay, 100));
-          };
-          return probabilisticLoop;
-        };
-
         const interval = layer.triggerInterval ?? { min: 5000, max: 10000 };
-        const probabilisticLoop = createProbabilisticLoop(interval.min, interval.max);
+        
+        const loop = () => {
+          if (!running) return;
+          
+          nodes.trigger?.();
+          
+          const multiplier = this.getProbabilityMultiplier(layer.id);
+          const baseDelay = interval.min + Math.random() * (interval.max - interval.min);
+          
+          let actualDelay = baseDelay;
+          if (multiplier > 1) {
+            actualDelay = baseDelay / multiplier;
+          } else if (multiplier < 1) {
+            actualDelay = baseDelay * (1 / multiplier);
+          }
+          
+          const minDelay = Math.max(interval.min * 0.3, 500);
+          const maxDelay = interval.max * 3;
+          actualDelay = clamp(actualDelay, minDelay, maxDelay);
+          
+          timeoutId = setTimeout(loop, actualDelay);
+        };
 
         nodes.startTriggerLoop = () => {
           running = true;
-          probabilisticLoop();
+          const initialDelay = interval.min + Math.random() * (interval.max - interval.min);
+          timeoutId = setTimeout(loop, initialDelay);
         };
 
         nodes.stopTriggerLoop = () => {
