@@ -3,6 +3,21 @@ import { audioEngine } from '../audio/AudioEngine';
 import { SCENES } from '../audio/scenes';
 import type { SceneDef, LayerState } from '../types';
 
+function updateMousePosition(e: MouseEvent) {
+  const normalizedX = e.clientX / window.innerWidth;
+  const normalizedY = e.clientY / window.innerHeight;
+  audioEngine.updateMousePosition(normalizedX, normalizedY);
+}
+
+function updateTouchPosition(e: TouchEvent) {
+  if (e.touches.length > 0) {
+    const touch = e.touches[0];
+    const normalizedX = touch.clientX / window.innerWidth;
+    const normalizedY = touch.clientY / window.innerHeight;
+    audioEngine.updateMousePosition(normalizedX, normalizedY);
+  }
+}
+
 export function useAudioPlayer() {
   const [currentScene, setCurrentScene] = useState<SceneDef | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -10,6 +25,18 @@ export function useAudioPlayer() {
   const [timerMinutes, setTimerMinutes] = useState<number>(0);
   const [timerRemaining, setTimerRemaining] = useState<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    window.addEventListener('mousemove', updateMousePosition);
+    window.addEventListener('touchmove', updateTouchPosition);
+    window.addEventListener('touchstart', updateTouchPosition);
+
+    return () => {
+      window.removeEventListener('mousemove', updateMousePosition);
+      window.removeEventListener('touchmove', updateTouchPosition);
+      window.removeEventListener('touchstart', updateTouchPosition);
+    };
+  }, []);
 
   const loadScene = useCallback(async (scene: SceneDef) => {
     await audioEngine.loadScene(scene);

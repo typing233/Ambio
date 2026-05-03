@@ -5,9 +5,13 @@
  * detail layers are randomly triggered on configurable intervals.
  *
  * All sounds are synthesised in‑browser – no external audio files needed.
+ *
+ * New features:
+ * - Spatial audio: mouse position affects pan and volume
+ * - Trigger relations: sounds can boost probability of related sounds
  */
 
-import type { SceneDef } from '../types';
+import type { SceneDef, SpatialBehavior, TriggerRelation } from '../types';
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -47,19 +51,58 @@ function makePinkNoiseBuffer(ctx: AudioContext, seconds = 2): AudioBuffer {
   return buf;
 }
 
+/** Clamp a value between min and max. */
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
 // ─── per-layer node graph ─────────────────────────────────────────────────────
 
 interface LayerNodes {
   gainNode: GainNode;
+  panNode: StereoPannerNode | null;
   stop: () => void;
-  /** For detail layers only – start the random-trigger loop. */
   startTriggerLoop?: () => void;
   stopTriggerLoop?: () => void;
+  baseVolume: number;
+  spatialConfig: SpatialBehavior;
+  triggerRelations: TriggerRelation[];
+  layerId: string;
 }
+
+// ─── Default configurations ───────────────────────────────────────────────────
+
+const DEFAULT_SPATIAL_CONFIG: SpatialBehavior = {
+  panAffected: false,
+  basePan: 0,
+  panRange: 0,
+  volumeAffected: false,
+  baseVolumeMultiplier: 1,
+  volumeRangeMultiplier: 0,
+  volumeAxis: 'x',
+};
 
 // ─── scene-specific synths ────────────────────────────────────────────────────
 
-function buildForestWind(ctx: AudioContext, dest: AudioNode): LayerNodes {
+interface BuilderOptions {
+  layerId: string;
+  baseVolume: number;
+  spatialConfig: SpatialBehavior;
+  triggerRelations: TriggerRelation[];
+  onTrigger?: () => void;
+}
+
+type BuilderFn = (
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+) => LayerNodes;
+
+function buildForestWind(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const noiseBuffer = makePinkNoiseBuffer(ctx, 4);
   const source = ctx.createBufferSource();
   source.buffer = noiseBuffer;
@@ -70,7 +113,6 @@ function buildForestWind(ctx: AudioContext, dest: AudioNode): LayerNodes {
   filter.frequency.value = 400;
   filter.Q.value = 0.4;
 
-  // slow LFO on filter frequency to simulate gusts
   const lfo = ctx.createOscillator();
   lfo.frequency.value = 0.08;
   const lfoGain = ctx.createGain();
@@ -79,20 +121,33 @@ function buildForestWind(ctx: AudioContext, dest: AudioNode): LayerNodes {
   lfoGain.connect(filter.frequency);
 
   const gain = ctx.createGain();
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+
   source.connect(filter);
   filter.connect(gain);
-  gain.connect(dest);
+  gain.connect(pan);
+  pan.connect(dest);
 
   source.start();
   lfo.start();
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { try { source.stop(); lfo.stop(); } catch {/* ignore */} },
   };
 }
 
-function buildForestLeaves(ctx: AudioContext, dest: AudioNode): LayerNodes {
+function buildForestLeaves(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const noiseBuffer = makeNoiseBuffer(ctx, 2);
   const source = ctx.createBufferSource();
   source.buffer = noiseBuffer;
@@ -108,16 +163,32 @@ function buildForestLeaves(ctx: AudioContext, dest: AudioNode): LayerNodes {
   filter2.frequency.value = 8000;
 
   const gain = ctx.createGain();
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+
   source.connect(filter);
   filter.connect(filter2);
   filter2.connect(gain);
-  gain.connect(dest);
+  gain.connect(pan);
+  pan.connect(dest);
   source.start();
 
-  return { gainNode: gain, stop: () => { try { source.stop(); } catch {/* */} } };
+  return {
+    layerId: options.layerId,
+    gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
+    stop: () => { try { source.stop(); } catch {/* */} },
+  };
 }
 
-function buildForestStream(ctx: AudioContext, dest: AudioNode): LayerNodes {
+function buildForestStream(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const noiseBuffer = makeNoiseBuffer(ctx, 2);
   const source = ctx.createBufferSource();
   source.buffer = noiseBuffer;
@@ -129,22 +200,43 @@ function buildForestStream(ctx: AudioContext, dest: AudioNode): LayerNodes {
   filter.Q.value = 0.6;
 
   const gain = ctx.createGain();
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+
   source.connect(filter);
   filter.connect(gain);
-  gain.connect(dest);
+  gain.connect(pan);
+  pan.connect(dest);
   source.start();
 
-  return { gainNode: gain, stop: () => { try { source.stop(); } catch {/* */} } };
+  return {
+    layerId: options.layerId,
+    gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
+    stop: () => { try { source.stop(); } catch {/* */} },
+  };
 }
 
-function buildBird1(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildBird1(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
 
   const chirp = () => {
+    options.onTrigger?.();
+    
     const osc = ctx.createOscillator();
     const env = ctx.createGain();
     osc.connect(env);
@@ -156,6 +248,7 @@ function buildBird1(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes
     osc.frequency.linearRampToValueAtTime(baseFreq * 1.3, ctx.currentTime + 0.08);
     osc.frequency.linearRampToValueAtTime(baseFreq, ctx.currentTime + 0.15);
 
+    const vol = options.baseVolume;
     env.gain.setValueAtTime(0, ctx.currentTime);
     env.gain.linearRampToValueAtTime(vol, ctx.currentTime + 0.02);
     env.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.18);
@@ -163,7 +256,6 @@ function buildBird1(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes
     osc.start(ctx.currentTime);
     osc.stop(ctx.currentTime + 0.25);
 
-    // 2-3 chirp sequence
     const repeats = Math.floor(Math.random() * 3) + 1;
     for (let r = 1; r < repeats; r++) {
       const delay = r * 0.22;
@@ -190,24 +282,40 @@ function buildBird1(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
   };
 }
 
-function buildBird2(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildBird2(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const chirp = () => {
+    options.onTrigger?.();
+    
     const notes = [1800, 2000, 2400, 1600];
     const base = notes[Math.floor(Math.random() * notes.length)];
+    const vol = options.baseVolume * 0.8;
+    
     for (let i = 0; i < 4; i++) {
       const t = ctx.currentTime + i * 0.16;
       const osc = ctx.createOscillator();
@@ -217,7 +325,7 @@ function buildBird2(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(base + i * 80, t);
       env.gain.setValueAtTime(0, t);
-      env.gain.linearRampToValueAtTime(vol * 0.8, t + 0.03);
+      env.gain.linearRampToValueAtTime(vol, t + 0.03);
       env.gain.linearRampToValueAtTime(0, t + 0.12);
       osc.start(t);
       osc.stop(t + 0.15);
@@ -231,7 +339,12 @@ function buildBird2(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
@@ -240,7 +353,11 @@ function buildBird2(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes
 
 // ── café ──────────────────────────────────────────────────────────────────────
 
-function buildCafeChatter(ctx: AudioContext, dest: AudioNode): LayerNodes {
+function buildCafeChatter(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const pinkBuf = makePinkNoiseBuffer(ctx, 4);
   const source = ctx.createBufferSource();
   source.buffer = pinkBuf;
@@ -256,21 +373,39 @@ function buildCafeChatter(ctx: AudioContext, dest: AudioNode): LayerNodes {
   filter2.frequency.value = 3000;
 
   const gain = ctx.createGain();
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+
   source.connect(filter);
   filter.connect(filter2);
   filter2.connect(gain);
-  gain.connect(dest);
+  gain.connect(pan);
+  pan.connect(dest);
   source.start();
 
-  return { gainNode: gain, stop: () => { try { source.stop(); } catch {/* */} } };
+  return {
+    layerId: options.layerId,
+    gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
+    stop: () => { try { source.stop(); } catch {/* */} },
+  };
 }
 
-function buildCafeMusic(ctx: AudioContext, dest: AudioNode): LayerNodes {
-  // Gentle pad: multiple detuned oscillators
-  const frequencies = [261.63, 329.63, 392.0, 523.25]; // C4 major chord
+function buildCafeMusic(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
+  const frequencies = [261.63, 329.63, 392.0, 523.25];
   const oscs: OscillatorNode[] = [];
   const gain = ctx.createGain();
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   frequencies.forEach((freq, i) => {
     const osc = ctx.createOscillator();
@@ -285,20 +420,34 @@ function buildCafeMusic(ctx: AudioContext, dest: AudioNode): LayerNodes {
   });
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => oscs.forEach(o => { try { o.stop(); } catch {/* */} }),
   };
 }
 
-function buildCafeMachine(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildCafeMachine(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const trigger = () => {
+    options.onTrigger?.();
+    
     const noiseBuf = makeNoiseBuffer(ctx, 1);
     const src = ctx.createBufferSource();
     src.buffer = noiseBuf;
@@ -313,6 +462,7 @@ function buildCafeMachine(ctx: AudioContext, dest: AudioNode, vol: number): Laye
     filter.connect(env);
     env.connect(gain);
 
+    const vol = options.baseVolume;
     env.gain.setValueAtTime(0, ctx.currentTime);
     env.gain.linearRampToValueAtTime(vol, ctx.currentTime + 0.1);
     env.gain.setValueAtTime(vol, ctx.currentTime + 0.6);
@@ -329,22 +479,36 @@ function buildCafeMachine(ctx: AudioContext, dest: AudioNode, vol: number): Laye
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
   };
 }
 
-function buildCafeClink(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildCafeClink(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const trigger = () => {
+    options.onTrigger?.();
+    
     const freq = 1800 + Math.random() * 600;
     const osc = ctx.createOscillator();
     const env = ctx.createGain();
@@ -353,6 +517,7 @@ function buildCafeClink(ctx: AudioContext, dest: AudioNode, vol: number): LayerN
     osc.type = 'sine';
     osc.frequency.value = freq;
 
+    const vol = options.baseVolume;
     env.gain.setValueAtTime(vol, ctx.currentTime);
     env.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
 
@@ -367,23 +532,39 @@ function buildCafeClink(ctx: AudioContext, dest: AudioNode, vol: number): LayerN
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
   };
 }
 
-function buildCafeDoor(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildCafeDoor(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const trigger = () => {
-    const tones = [880, 1108, 1318]; // A5, C#6, E6 – pleasant bell chord
+    options.onTrigger?.();
+    
+    const tones = [880, 1108, 1318];
+    const vol = options.baseVolume * 0.7;
+    
     tones.forEach((freq, i) => {
       const t = ctx.currentTime + i * 0.12;
       const osc = ctx.createOscillator();
@@ -392,7 +573,7 @@ function buildCafeDoor(ctx: AudioContext, dest: AudioNode, vol: number): LayerNo
       env.connect(gain);
       osc.type = 'sine';
       osc.frequency.value = freq;
-      env.gain.setValueAtTime(vol * 0.7, t);
+      env.gain.setValueAtTime(vol, t);
       env.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
       osc.start(t);
       osc.stop(t + 1.25);
@@ -406,7 +587,12 @@ function buildCafeDoor(ctx: AudioContext, dest: AudioNode, vol: number): LayerNo
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
@@ -415,7 +601,11 @@ function buildCafeDoor(ctx: AudioContext, dest: AudioNode, vol: number): LayerNo
 
 // ── rain ──────────────────────────────────────────────────────────────────────
 
-function buildRainHeavy(ctx: AudioContext, dest: AudioNode): LayerNodes {
+function buildRainHeavy(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const buf = makeNoiseBuffer(ctx, 2);
   const src = ctx.createBufferSource();
   src.buffer = buf;
@@ -427,15 +617,31 @@ function buildRainHeavy(ctx: AudioContext, dest: AudioNode): LayerNodes {
   filter.Q.value = 0.3;
 
   const gain = ctx.createGain();
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+
   src.connect(filter);
   filter.connect(gain);
-  gain.connect(dest);
+  gain.connect(pan);
+  pan.connect(dest);
   src.start();
 
-  return { gainNode: gain, stop: () => { try { src.stop(); } catch {/* */} } };
+  return {
+    layerId: options.layerId,
+    gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
+    stop: () => { try { src.stop(); } catch {/* */} },
+  };
 }
 
-function buildRainWindow(ctx: AudioContext, dest: AudioNode): LayerNodes {
+function buildRainWindow(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const buf = makeNoiseBuffer(ctx, 2);
   const src = ctx.createBufferSource();
   src.buffer = buf;
@@ -446,23 +652,44 @@ function buildRainWindow(ctx: AudioContext, dest: AudioNode): LayerNodes {
   filter.frequency.value = 3000;
 
   const gain = ctx.createGain();
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+
   src.connect(filter);
   filter.connect(gain);
-  gain.connect(dest);
+  gain.connect(pan);
+  pan.connect(dest);
   src.start();
 
-  return { gainNode: gain, stop: () => { try { src.stop(); } catch {/* */} } };
+  return {
+    layerId: options.layerId,
+    gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
+    stop: () => { try { src.stop(); } catch {/* */} },
+  };
 }
 
-function buildThunder(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildThunder(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const trigger = () => {
+    options.onTrigger?.();
+    
     const duration = 2 + Math.random() * 2;
     const buf = makeNoiseBuffer(ctx, Math.ceil(duration) + 1);
     const src = ctx.createBufferSource();
@@ -477,6 +704,7 @@ function buildThunder(ctx: AudioContext, dest: AudioNode, vol: number): LayerNod
     filter.connect(env);
     env.connect(gain);
 
+    const vol = options.baseVolume;
     env.gain.setValueAtTime(0, ctx.currentTime);
     env.gain.linearRampToValueAtTime(vol, ctx.currentTime + 0.03);
     env.gain.setValueAtTime(vol * 0.6, ctx.currentTime + 0.3);
@@ -493,22 +721,36 @@ function buildThunder(ctx: AudioContext, dest: AudioNode, vol: number): LayerNod
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
   };
 }
 
-function buildDrip(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildDrip(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const trigger = () => {
+    options.onTrigger?.();
+    
     const freq = 600 + Math.random() * 400;
     const osc = ctx.createOscillator();
     const env = ctx.createGain();
@@ -517,8 +759,11 @@ function buildDrip(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes 
     osc.type = 'sine';
     osc.frequency.setValueAtTime(freq, ctx.currentTime);
     osc.frequency.exponentialRampToValueAtTime(freq * 0.6, ctx.currentTime + 0.15);
+    
+    const vol = options.baseVolume;
     env.gain.setValueAtTime(vol, ctx.currentTime);
     env.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+    
     osc.start(ctx.currentTime);
     osc.stop(ctx.currentTime + 0.25);
   };
@@ -530,7 +775,12 @@ function buildDrip(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes 
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
@@ -539,7 +789,11 @@ function buildDrip(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes 
 
 // ── study ─────────────────────────────────────────────────────────────────────
 
-function buildStudyRoom(ctx: AudioContext, dest: AudioNode): LayerNodes {
+function buildStudyRoom(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const buf = makePinkNoiseBuffer(ctx, 4);
   const src = ctx.createBufferSource();
   src.buffer = buf;
@@ -550,30 +804,53 @@ function buildStudyRoom(ctx: AudioContext, dest: AudioNode): LayerNodes {
   filter.frequency.value = 400;
 
   const gain = ctx.createGain();
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+
   src.connect(filter);
   filter.connect(gain);
-  gain.connect(dest);
+  gain.connect(pan);
+  pan.connect(dest);
   src.start();
 
-  return { gainNode: gain, stop: () => { try { src.stop(); } catch {/* */} } };
+  return {
+    layerId: options.layerId,
+    gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
+    stop: () => { try { src.stop(); } catch {/* */} },
+  };
 }
 
-function buildClock(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildClock(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const tick = () => {
+    options.onTrigger?.();
+    
     const osc = ctx.createOscillator();
     const env = ctx.createGain();
     osc.connect(env);
     env.connect(gain);
     osc.type = 'square';
     osc.frequency.value = 1200;
-    env.gain.setValueAtTime(vol * 0.5, ctx.currentTime);
+    
+    const vol = options.baseVolume * 0.5;
+    env.gain.setValueAtTime(vol, ctx.currentTime);
     env.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.03);
     osc.start(ctx.currentTime);
     osc.stop(ctx.currentTime + 0.04);
@@ -586,22 +863,36 @@ function buildClock(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
   };
 }
 
-function buildPageTurn(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildPageTurn(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const trigger = () => {
+    options.onTrigger?.();
+    
     const buf = makeNoiseBuffer(ctx, 1);
     const src = ctx.createBufferSource();
     src.buffer = buf;
@@ -620,6 +911,7 @@ function buildPageTurn(ctx: AudioContext, dest: AudioNode, vol: number): LayerNo
     filter2.connect(env);
     env.connect(gain);
 
+    const vol = options.baseVolume;
     env.gain.setValueAtTime(0, ctx.currentTime);
     env.gain.linearRampToValueAtTime(vol, ctx.currentTime + 0.03);
     env.gain.linearRampToValueAtTime(vol * 0.6, ctx.currentTime + 0.15);
@@ -636,23 +928,39 @@ function buildPageTurn(ctx: AudioContext, dest: AudioNode, vol: number): LayerNo
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
   };
 }
 
-function buildPen(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildPen(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const trigger = () => {
+    options.onTrigger?.();
+    
     const strokes = 3 + Math.floor(Math.random() * 5);
+    const vol = options.baseVolume * 0.5;
+    
     for (let i = 0; i < strokes; i++) {
       const t = ctx.currentTime + i * (0.06 + Math.random() * 0.04);
       const buf = makeNoiseBuffer(ctx, 0.1);
@@ -667,7 +975,7 @@ function buildPen(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
       filter.connect(env);
       env.connect(gain);
       env.gain.setValueAtTime(0, t);
-      env.gain.linearRampToValueAtTime(vol * 0.5, t + 0.01);
+      env.gain.linearRampToValueAtTime(vol, t + 0.01);
       env.gain.linearRampToValueAtTime(0, t + 0.06);
       src.start(t);
       src.stop(t + 0.08);
@@ -681,23 +989,37 @@ function buildPen(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
   };
 }
 
-function buildOwl(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
+function buildOwl(
+  ctx: AudioContext,
+  dest: AudioNode,
+  options: BuilderOptions
+): LayerNodes {
   const gain = ctx.createGain();
   gain.gain.value = 0;
-  gain.connect(dest);
+  const pan = ctx.createStereoPanner();
+  pan.pan.value = options.spatialConfig.basePan;
+  gain.connect(pan);
+  pan.connect(dest);
 
   let rafId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
   const trigger = () => {
-    // two-note hoo-hoo
+    options.onTrigger?.();
+    
+    const vol = options.baseVolume;
     [0, 0.5].forEach((offset) => {
       const t = ctx.currentTime + offset;
       const osc = ctx.createOscillator();
@@ -722,7 +1044,12 @@ function buildOwl(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
   };
 
   return {
+    layerId: options.layerId,
     gainNode: gain,
+    panNode: pan,
+    baseVolume: options.baseVolume,
+    spatialConfig: options.spatialConfig,
+    triggerRelations: options.triggerRelations,
     stop: () => { running = false; if (rafId) clearTimeout(rafId); },
     startTriggerLoop: () => { running = true; loop(); },
     stopTriggerLoop: () => { running = false; if (rafId) clearTimeout(rafId); },
@@ -731,32 +1058,38 @@ function buildOwl(ctx: AudioContext, dest: AudioNode, vol: number): LayerNodes {
 
 // ─── builder map ──────────────────────────────────────────────────────────────
 
-type BuilderFn = (ctx: AudioContext, dest: AudioNode, vol: number) => LayerNodes;
-
 const LAYER_BUILDERS: Record<string, BuilderFn> = {
-  forest_wind: (ctx, dest) => buildForestWind(ctx, dest),
-  forest_leaves: (ctx, dest) => buildForestLeaves(ctx, dest),
-  forest_stream: (ctx, dest) => buildForestStream(ctx, dest),
+  forest_wind: buildForestWind,
+  forest_leaves: buildForestLeaves,
+  forest_stream: buildForestStream,
   forest_bird1: buildBird1,
   forest_bird2: buildBird2,
 
-  cafe_chatter: (ctx, dest) => buildCafeChatter(ctx, dest),
-  cafe_music: (ctx, dest) => buildCafeMusic(ctx, dest),
+  cafe_chatter: buildCafeChatter,
+  cafe_music: buildCafeMusic,
   cafe_machine: buildCafeMachine,
   cafe_clink: buildCafeClink,
   cafe_door: buildCafeDoor,
 
-  rain_heavy: (ctx, dest) => buildRainHeavy(ctx, dest),
-  rain_window: (ctx, dest) => buildRainWindow(ctx, dest),
+  rain_heavy: buildRainHeavy,
+  rain_window: buildRainWindow,
   rain_thunder: buildThunder,
   rain_drip: buildDrip,
 
-  study_room: (ctx, dest) => buildStudyRoom(ctx, dest),
+  study_room: buildStudyRoom,
   study_clock: buildClock,
   study_page: buildPageTurn,
   study_pen: buildPen,
   study_owl: buildOwl,
 };
+
+// ─── Trigger Probability System ──────────────────────────────────────────────
+
+interface ProbabilityBoost {
+  targetLayerId: string;
+  multiplier: number;
+  endTime: number;
+}
 
 // ─── AudioEngine public API ───────────────────────────────────────────────────
 
@@ -765,6 +1098,11 @@ export class AudioEngine {
   private masterGain: GainNode | null = null;
   private activeNodes: Map<string, LayerNodes> = new Map();
   private currentSceneId: string | null = null;
+  
+  private probabilityBoosts: ProbabilityBoost[] = [];
+  private mouseX: number = 0.5;
+  private mouseY: number = 0.5;
+  private userVolumes: Map<string, number> = new Map();
 
   private ensureContext() {
     if (!this.ctx || this.ctx.state === 'closed') {
@@ -778,8 +1116,83 @@ export class AudioEngine {
     return this.ctx;
   }
 
+  private handleTrigger(layerId: string) {
+    const nodes = this.activeNodes.get(layerId);
+    if (!nodes) return;
+
+    for (const relation of nodes.triggerRelations) {
+      this.addProbabilityBoost(
+        relation.targetLayerId,
+        relation.probabilityMultiplier,
+        relation.durationMs
+      );
+    }
+  }
+
+  private addProbabilityBoost(targetLayerId: string, multiplier: number, durationMs: number) {
+    const now = Date.now();
+    this.probabilityBoosts.push({
+      targetLayerId,
+      multiplier,
+      endTime: now + durationMs,
+    });
+  }
+
+  private getProbabilityMultiplier(layerId: string): number {
+    const now = Date.now();
+    this.probabilityBoosts = this.probabilityBoosts.filter(b => b.endTime > now);
+    
+    let multiplier = 1;
+    for (const boost of this.probabilityBoosts) {
+      if (boost.targetLayerId === layerId) {
+        multiplier *= boost.multiplier;
+      }
+    }
+    return multiplier;
+  }
+
+  private applySpatialUpdates() {
+    if (!this.ctx) return;
+
+    for (const [layerId, nodes] of this.activeNodes) {
+      const config = nodes.spatialConfig;
+      
+      if (config.panAffected && nodes.panNode) {
+        const targetPan = config.basePan + (this.mouseX - 0.5) * 2 * config.panRange;
+        const clampedPan = clamp(targetPan, -1, 1);
+        ramp(nodes.panNode.pan, clampedPan, this.ctx, 0.1);
+      }
+
+      if (config.volumeAffected) {
+        let volumeFactor = config.baseVolumeMultiplier;
+        
+        if (config.volumeAxis === 'x' || config.volumeAxis === 'both') {
+          const xFactor = 1 + (this.mouseX - 0.5) * 2 * config.volumeRangeMultiplier;
+          volumeFactor *= xFactor;
+        }
+        if (config.volumeAxis === 'y' || config.volumeAxis === 'both') {
+          const yFactor = 1 + (this.mouseY - 0.5) * 2 * config.volumeRangeMultiplier;
+          volumeFactor *= yFactor;
+        }
+
+        const userVolume = this.userVolumes.get(layerId) ?? nodes.baseVolume;
+        const targetVolume = userVolume * clamp(volumeFactor, 0, 3);
+        ramp(nodes.gainNode.gain, targetVolume, this.ctx, 0.1);
+      }
+    }
+  }
+
+  updateMousePosition(normalizedX: number, normalizedY: number) {
+    this.mouseX = clamp(normalizedX, 0, 1);
+    this.mouseY = clamp(normalizedY, 0, 1);
+    this.applySpatialUpdates();
+  }
+
   async loadScene(scene: SceneDef): Promise<void> {
     this.stopAll();
+    this.probabilityBoosts = [];
+    this.userVolumes.clear();
+    
     const ctx = this.ensureContext();
     this.currentSceneId = scene.id;
 
@@ -787,21 +1200,102 @@ export class AudioEngine {
       const builder = LAYER_BUILDERS[layer.id];
       if (!builder) continue;
 
-      const nodes = builder(ctx, this.masterGain!, layer.defaultVolume);
-      nodes.gainNode.gain.value = layer.defaultVolume;
+      const spatialConfig: SpatialBehavior = {
+        ...DEFAULT_SPATIAL_CONFIG,
+        ...layer.spatialBehavior,
+      };
+
+      const triggerRelations = layer.triggerRelations ?? [];
+
+      const options: BuilderOptions = {
+        layerId: layer.id,
+        baseVolume: layer.defaultVolume,
+        spatialConfig,
+        triggerRelations,
+        onTrigger: () => this.handleTrigger(layer.id),
+      };
+
+      const nodes = builder(ctx, this.masterGain!, options);
+      
+      if (spatialConfig.volumeAffected) {
+        nodes.gainNode.gain.value = layer.defaultVolume * spatialConfig.baseVolumeMultiplier;
+      } else {
+        nodes.gainNode.gain.value = layer.defaultVolume;
+      }
 
       if (layer.type === 'detail' && nodes.startTriggerLoop) {
+        const originalLoop = nodes.startTriggerLoop;
+        let running = false;
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+        const createProbabilisticLoop = (minInterval: number, maxInterval: number) => {
+          const probabilisticLoop = () => {
+            if (!running) return;
+            
+            const multiplier = this.getProbabilityMultiplier(layer.id);
+            if (Math.random() < multiplier || multiplier >= 1) {
+              nodes.stopTriggerLoop?.();
+              originalLoop();
+            }
+            
+            let actualMultiplier = multiplier;
+            if (multiplier > 1) {
+              actualMultiplier = 1 / multiplier;
+            }
+            
+            const baseInterval = minInterval + Math.random() * (maxInterval - minInterval);
+            const nextDelay = baseInterval * actualMultiplier;
+            
+            timeoutId = setTimeout(probabilisticLoop, Math.max(nextDelay, 100));
+          };
+          return probabilisticLoop;
+        };
+
+        const interval = layer.triggerInterval ?? { min: 5000, max: 10000 };
+        const probabilisticLoop = createProbabilisticLoop(interval.min, interval.max);
+
+        nodes.startTriggerLoop = () => {
+          running = true;
+          probabilisticLoop();
+        };
+
+        nodes.stopTriggerLoop = () => {
+          running = false;
+          if (timeoutId) clearTimeout(timeoutId);
+        };
+
         nodes.startTriggerLoop();
       }
 
       this.activeNodes.set(layer.id, nodes);
+      this.userVolumes.set(layer.id, layer.defaultVolume);
     }
+
+    this.applySpatialUpdates();
   }
 
   setLayerVolume(layerId: string, volume: number) {
     const nodes = this.activeNodes.get(layerId);
     if (!nodes || !this.ctx) return;
-    ramp(nodes.gainNode.gain, volume, this.ctx, 0.1);
+
+    this.userVolumes.set(layerId, volume);
+    
+    const config = nodes.spatialConfig;
+    if (config.volumeAffected) {
+      let volumeFactor = config.baseVolumeMultiplier;
+      if (config.volumeAxis === 'x' || config.volumeAxis === 'both') {
+        const xFactor = 1 + (this.mouseX - 0.5) * 2 * config.volumeRangeMultiplier;
+        volumeFactor *= xFactor;
+      }
+      if (config.volumeAxis === 'y' || config.volumeAxis === 'both') {
+        const yFactor = 1 + (this.mouseY - 0.5) * 2 * config.volumeRangeMultiplier;
+        volumeFactor *= yFactor;
+      }
+      const targetVolume = volume * clamp(volumeFactor, 0, 3);
+      ramp(nodes.gainNode.gain, targetVolume, this.ctx, 0.1);
+    } else {
+      ramp(nodes.gainNode.gain, volume, this.ctx, 0.1);
+    }
   }
 
   pause() {
@@ -819,6 +1313,7 @@ export class AudioEngine {
     });
     this.activeNodes.clear();
     this.currentSceneId = null;
+    this.probabilityBoosts = [];
   }
 
   get isRunning() {
