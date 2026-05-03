@@ -18,12 +18,14 @@ export default function App() {
     layers,
     timerMinutes,
     timerRemaining,
+    spatialAudioEnabled,
     toggle,
     selectScene,
     setLayerVolume,
     toggleMute,
     startTimer,
     cancelTimer,
+    toggleSpatialAudio,
   } = useAudioPlayer();
 
   const handleSmartMatch = async (input: SmartMatchInput) => {
@@ -114,15 +116,52 @@ export default function App() {
         )}
         {tab === 'smart' && <SmartMatch onMatch={handleSmartMatch} />}
         {tab === 'mixer' && (
-          layers.length > 0 ? (
-            <Mixer
-              layers={layers}
-              onVolumeChange={setLayerVolume}
-              onToggleMute={toggleMute}
-            />
-          ) : (
-            <p className="text-sm text-white/30 text-center mt-8">请先选择一个场景</p>
-          )
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center justify-between px-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-white/50">🎵 空间音频</span>
+                <span className={`text-xs ${spatialAudioEnabled ? 'text-emerald-400' : 'text-white/30'}`}>
+                  {spatialAudioEnabled ? '已启用' : '已禁用'}
+                </span>
+              </div>
+              <button
+                onClick={toggleSpatialAudio}
+                className={`w-11 h-6 rounded-full transition-all duration-200 relative ${
+                  spatialAudioEnabled
+                    ? 'bg-emerald-500/80'
+                    : 'bg-white/15'
+                }`}
+                title={spatialAudioEnabled ? '禁用空间音频' : '启用空间音频'}
+              >
+                <div
+                  className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all duration-200 ${
+                    spatialAudioEnabled ? 'left-5' : 'left-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+            
+            {spatialAudioEnabled && (
+              <div className="px-2 py-2 rounded-lg bg-white/5 border border-white/10">
+                <p className="text-xs text-white/40">
+                  💡 移动鼠标时，部分音效的声道和音量会随之变化。
+                </p>
+                <p className="text-xs text-white/30 mt-1">
+                  如果这干扰了您的音量调节，可以关闭此功能。
+                </p>
+              </div>
+            )}
+            
+            {layers.length > 0 ? (
+              <Mixer
+                layers={layers}
+                onVolumeChange={setLayerVolume}
+                onToggleMute={toggleMute}
+              />
+            ) : (
+              <p className="text-sm text-white/30 text-center mt-4">请先选择一个场景</p>
+            )}
+          </div>
         )}
         {tab === 'timer' && (
           <div className="flex flex-col gap-2">

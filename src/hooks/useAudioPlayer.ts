@@ -24,6 +24,7 @@ export function useAudioPlayer() {
   const [layers, setLayers] = useState<LayerState[]>([]);
   const [timerMinutes, setTimerMinutes] = useState<number>(0);
   const [timerRemaining, setTimerRemaining] = useState<number>(0);
+  const [spatialAudioEnabled, setSpatialAudioEnabled] = useState<boolean>(audioEngine.isSpatialAudioEnabled);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -128,6 +129,12 @@ export function useAudioPlayer() {
     setTimerRemaining(0);
   }, []);
 
+  const toggleSpatialAudio = useCallback(() => {
+    const newState = !audioEngine.isSpatialAudioEnabled;
+    audioEngine.setSpatialAudioEnabled(newState);
+    setSpatialAudioEnabled(newState);
+  }, []);
+
   useEffect(() => () => { audioEngine.stopAll(); }, []);
 
   return {
@@ -136,6 +143,7 @@ export function useAudioPlayer() {
     layers,
     timerMinutes,
     timerRemaining,
+    spatialAudioEnabled,
     play,
     pause,
     toggle,
@@ -144,5 +152,6 @@ export function useAudioPlayer() {
     toggleMute,
     startTimer,
     cancelTimer,
+    toggleSpatialAudio,
   };
 }
